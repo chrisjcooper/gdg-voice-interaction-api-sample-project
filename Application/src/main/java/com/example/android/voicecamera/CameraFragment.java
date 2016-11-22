@@ -72,7 +72,20 @@ import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
+import android.app.VoiceInteractor;
+import android.app.VoiceInteractor.PickOptionRequest;
+import android.app.VoiceInteractor.PickOptionRequest.Option;
+import android.view.Gravity;
+import android.widget.TextView;
+import java.util.Timer;
+import java.util.TimerTask;
+
 public class CameraFragment extends Fragment implements View.OnClickListener {
+
+    private static final String EXTRA_TIMER_DURATION_SECONDS = "android.intent.extra.TIMER_DURATION_SECONDS";
+
+    private TextView mTimerCountdownLabel = null;
+    private Toast mTimerCountdownToast = null;
 
     /**
      * Tag for the {@link Log}.
@@ -367,12 +380,43 @@ public class CameraFragment extends Fragment implements View.OnClickListener {
      * @param text The message to show
      */
     private void showToast(String text) {
-        Log.d(TAG, "showToast: ");
         // We show a Toast by sending request message to mMessageHandler. This makes sure that the
         // Toast is shown on the UI thread.
-        Message message = Message.obtain();
-        message.obj = text;
-        mMessageHandler.sendMessage(message);
+        Activity activity = getActivity();
+        if (activity.isVoiceInteraction()) {
+            Message message = Message.obtain();
+            message.obj = text;
+            //mSharingHandler.sendMessage(message);
+
+            Uri contextUri = Uri.fromFile(mFile);
+            Log.e(TAG, "PHOTO URI: " + contextUri);
+            Log.e(TAG, "PHOTO LOCATION: " + mFile.getAbsolutePath());
+            Log.e(TAG, "showToast:" + Log.getStackTraceString(new Exception()));
+
+            Bundle extras = new Bundle();
+            extras.putParcelable("context_uri", contextUri);
+
+            VoiceInteractor.Prompt prompt = new VoiceInteractor.Prompt("Here it is");
+
+            activity.getVoiceInteractor().submitRequest(new VoiceInteractor.CompleteVoiceRequest(prompt, extras) {
+                        @Override
+                        public void onCompleteResult(Bundle result) {
+                            super.onCompleteResult(result);
+                            Log.d(TAG, "OnCompleteResult:" + Log.getStackTraceString(new Exception()));
+                            Intent intent = new Intent();
+                            intent.setAction(Intent.ACTION_VIEW);
+                            intent.setDataAndType(Uri.parse("file://" + mFile.getAbsolutePath()), "image/*");
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                            getActivity().finish();
+                            startActivity(intent);
+                        }
+                    });
+        } else {
+            Message message = Message.obtain();
+            message.obj = text;
+            mMessageHandler.sendMessage(message);
+        }
     }
 
     /**
@@ -409,13 +453,17 @@ public class CameraFragment extends Fragment implements View.OnClickListener {
     }
 
     @Override
-    public View onCreateView(LayoutInflater inflater, ViewGroup container,
-                             Bundle savedInstanceState) {
+    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
         Log.d(TAG, "onCreateView: ");
         View view = inflater.inflate(R.layout.fragment_camera2_basic, container, false);
+        if (getActivity().isVoiceInteraction()) {
+            View controls = view.findViewById(R.id.controls);
+            if (controls != null) {
+                controls.setVisibility(View.GONE);
+            }
+        }
         return view;
     }
-
     @Override
     public void onViewCreated(final View view, Bundle savedInstanceState) {
         Log.d(TAG, "onViewCreated: ");
@@ -479,6 +527,97 @@ public class CameraFragment extends Fragment implements View.OnClickListener {
         if (mOrientationListener.canDetectOrientation()) {
             mOrientationListener.enable();
         }
+
+        if (getActivity().isVoiceInteraction()) {
+            if (isTimerSpecified()) {
+                startVoiceTimer();
+            } else {
+                startVoiceTrigger();
+            }
+        }
+    }
+
+    private void startVoiceTrigger() {
+        Log.d(TAG, "startVoiceTrigger: ");
+        Option option = new Option("cheese", 1);
+        option.addSynonym("ready");
+        option.addSynonym("go");
+        option.addSynonym("take it");
+        option.addSynonym("ok");
+
+        VoiceInteractor.Prompt prompt = new VoiceInteractor.Prompt("Say Cheese");
+
+        getActivity().getVoiceInteractor()
+                .submitRequest(new PickOptionRequest(prompt, new Option[]{option}, null) {
+                    @Override
+                    public void onPickOptionResult(boolean finished, Option[] selections, Bundle result) {
+                        if (finished && selections.length == 1) {
+                            Message message = Message.obtain();
+                            message.obj = result;
+                            takePicture();
+                        } else {
+                            getActivity().finish();
+                        }
+                    }
+                    @Override
+                    public void onCancel() {
+                        getActivity().finish();
+                    }
+                });
+    }
+
+    private void startVoiceTimer() {
+        Log.d(TAG, "startVoiceTimer: ");
+        final int countdown = getArguments().getInt(EXTRA_TIMER_DURATION_SECONDS);
+
+        mTimerCountdownToast = new Toast(getActivity().getApplicationContext());
+        mTimerCountdownToast.setGravity(Gravity.CENTER, 0, 0);
+        mTimerCountdownToast.setDuration(Toast.LENGTH_SHORT);
+
+        LayoutInflater inflater = getActivity().getLayoutInflater();
+        View layout = inflater.inflate(R.layout.toast_timer,
+                (ViewGroup) getActivity().findViewById(R.id.toast_layout_root));
+        mTimerCountdownToast.setView(layout);
+        final TextView label = (TextView) layout.findViewById(R.id.countdown_text);
+
+        Timer timer = new Timer("camera_timer");
+        timer.scheduleAtFixedRate(new TimerTask() {
+            private int mCountdown = countdown;
+
+            @Override
+            public void run() {
+                getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mCountdown < 0) {
+                            Log.e(TAG, "Take photo: " + mCountdown);
+                            mTimerCountdownToast.cancel();
+                            takePicture();
+                        } else {
+                            Log.e(TAG, "Execute timer: " + mCountdown);
+                            label.setText(String.format("Photo in %d", mCountdown));
+                            mTimerCountdownToast.show();
+                        }
+                    }
+                });
+                mCountdown--;
+                if (mCountdown < 0) {
+                    cancel();
+                }
+            }
+        }, 1000, 1000);
+    }
+
+    public static CameraFragment newInstance() {
+        Log.d(TAG, "newInstance: ");
+        CameraFragment fragment = new CameraFragment();
+        fragment.setRetainInstance(true);
+        return fragment;
+    }
+
+    private boolean isTimerSpecified() {
+        Log.d(TAG, "isTimerSpecified: ");
+        return getArguments() != null && getArguments().containsKey(EXTRA_TIMER_DURATION_SECONDS);
     }
 
     @Override
